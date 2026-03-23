@@ -1,0 +1,12 @@
+{
+  "name": "usmanpura-imaging-review-bot",
+  "version": "1.0.0",
+  "description": "Google Review Reply Bot for Usmanpura Imaging Centre - 15 Branches",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
