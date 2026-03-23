@@ -1,18 +1,15 @@
 {
   "name": "google-review-auto-reply",
   "version": "2.0.0",
-  "description": "Fully automated Google Review reply system",
+  "description": "Auto reply system for Google Reviews with round-robin templates",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "auto": "node google-business-setup.js",
     "dev": "nodemon server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "@google-cloud/pubsub": "^4.0.0",
-    "googleapis": "^126.0.0",
-    "axios": "^1.6.0"
+    "googleapis": "^126.0.0"
   },
   "engines": {
     "node": ">=14.0.0"
