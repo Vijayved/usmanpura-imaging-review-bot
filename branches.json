@@ -1,0 +1,19 @@
+{
+  "branches": [
+    {"id": 1, "name": "Usmanpura Imaging Centre Mavdi, Rajkot", "city": "Rajkot"},
+    {"id": 2, "name": "Usmanpura Imaging Centre Nadiad", "city": "Nadiad"},
+    {"id": 3, "name": "Usmanpura Imaging Centre Anand", "city": "Anand"},
+    {"id": 4, "name": "Usmanpura Imaging Centre Changodar", "city": "Ahmedabad"},
+    {"id": 5, "name": "Usmanpura Imaging Centre Bareja", "city": "Ahmedabad"},
+    {"id": 6, "name": "UIC Imaging and Diagnostics Centre Morbi", "city": "Morbi"},
+    {"id": 7, "name": "Usmanpura Imaging Centre - Usmanpura Branch", "city": "Ahmedabad"},
+    {"id": 8, "name": "Usmanpura Imaging Centre Satellite", "city": "Ahmedabad"},
+    {"id": 9, "name": "Usmanpura Imaging Centre JUHAPURA", "city": "Ahmedabad"},
+    {"id": 10, "name": "Usmanpura Imaging Centre, Vadaj", "city": "Ahmedabad"},
+    {"id": 11, "name": "Usmanpura Imaging Centre, Sabarmati Branch", "city": "Ahmedabad"},
+    {"id": 12, "name": "Usmanpura Imaging Centre, Naroda", "city": "Ahmedabad"},
+    {"id": 13, "name": "Usmanpura Imaging Centre, Maninagar Branch", "city": "Ahmedabad"},
+    {"id": 14, "name": "Usmanpura Imaging Centre, Gandhinagar", "city": "Gandhinagar"},
+    {"id": 15, "name": "Usmanpura Imaging Centre, Bapunagar", "city": "Ahmedabad"}
+  ]
+}
