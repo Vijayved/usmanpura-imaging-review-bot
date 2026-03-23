@@ -100,14 +100,14 @@ async function initializeGoogleAPI() {
         
         // Test by listing accounts
         const response = await axios.get(
-            'https://mybusinessaccountmanagement.googleapis.com/v1/accounts',
-            {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
+    'https://mybusinessaccountmanagement.googleapis.com/v1/accounts',
+    {
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        }
+    }
+);
         
         const accounts = response.data.accounts || [];
         console.log(`✅ Found ${accounts.length} Google Business accounts`);
@@ -143,17 +143,17 @@ async function postReplyToGoogle(reviewName, replyText) {
         
         // reviewName format: accounts/{accountId}/locations/{locationId}/reviews/{reviewId}
         const url = `https://mybusinessbusinessinformation.googleapis.com/v1/${reviewName}/reply`;
-        
-        const response = await axios.put(
-            url,
-            { comment: replyText },
-            {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/json'
-                }
-            }
-        );
+
+const response = await axios.put(
+    url,
+    { comment: replyText },
+    {
+        headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+        }
+    }
+);
         
         console.log(`✅ Reply posted to ${reviewName}`);
         return response.data;
