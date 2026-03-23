@@ -16,6 +16,8 @@ let repliesHistory = [];
 let webhookLogs = [];
 
 // Google Connection Status
+let mybusiness = null;
+let googleAuth = null;
 let googleConnectionStatus = {
     connected: false,
     lastCheck: null,
@@ -63,68 +65,91 @@ try {
 }
 
 // ============= GOOGLE BUSINESS API AUTH =============
-let googleAuth = null;
-let mybusiness = null;
-
 async function initializeGoogleAPI() {
     try {
         if (!process.env.GOOGLE_CREDENTIALS) {
             googleConnectionStatus = {
                 connected: false,
                 lastCheck: new Date().toISOString(),
-                error: 'GOOGLE_CREDENTIALS not set',
+                error: 'GOOGLE_CREDENTIALS not set in environment',
                 accountInfo: null
             };
             console.log('⚠️ GOOGLE_CREDENTIALS not set, API features disabled');
             return false;
         }
         
-        const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        console.log('📡 Initializing Google Business API...');
         
-        googleAuth = new google.auth.GoogleAuth({
+        // Parse credentials
+        let credentials;
+        try {
+            credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+            console.log('✅ Credentials parsed successfully');
+        } catch (e) {
+            throw new Error('Invalid GOOGLE_CREDENTIALS JSON: ' + e.message);
+        }
+        
+        // Create auth client
+        const auth = new google.auth.GoogleAuth({
             credentials: credentials,
             scopes: ['https://www.googleapis.com/auth/business.manage']
         });
         
+        googleAuth = auth;
+        
+        // Get auth client
+        const authClient = await auth.getClient();
+        
+        // Initialize My Business API - CORRECT WAY
         mybusiness = google.mybusiness({
             version: 'v4',
-            auth: googleAuth
+            auth: authClient
         });
         
-        // Test connection by fetching accounts
+        // Test connection by listing accounts
         try {
-            const accounts = await mybusiness.accounts.list();
+            console.log('🔍 Testing Google Business API connection...');
+            const response = await mybusiness.accounts.list();
+            
+            const accounts = response.data.accounts || [];
+            console.log(`✅ Found ${accounts.length} Google Business accounts`);
+            
             googleConnectionStatus = {
                 connected: true,
                 lastCheck: new Date().toISOString(),
                 error: null,
                 accountInfo: {
-                    accountCount: accounts.data.accounts?.length || 0,
-                    accounts: accounts.data.accounts?.map(a => ({ name: a.accountName, type: a.type }))
+                    accountCount: accounts.length,
+                    accounts: accounts.map(a => ({ 
+                        name: a.accountName || a.name, 
+                        type: a.type,
+                        id: a.name
+                    }))
                 }
             };
-            console.log('✅ Google Business API connected successfully');
-            console.log(`📊 Found ${accounts.data.accounts?.length || 0} Google Business accounts`);
+            
+            console.log('✅ Google Business API fully connected');
             return true;
+            
         } catch (apiError) {
+            console.error('❌ Google Business API test failed:', apiError.message);
             googleConnectionStatus = {
                 connected: false,
                 lastCheck: new Date().toISOString(),
                 error: apiError.message,
                 accountInfo: null
             };
-            console.error('❌ Google API test failed:', apiError.message);
             return false;
         }
         
     } catch (error) {
+        console.error('❌ Failed to initialize Google API:', error.message);
         googleConnectionStatus = {
             connected: false,
             lastCheck: new Date().toISOString(),
             error: error.message,
             accountInfo: null
         };
-        console.error('❌ Failed to initialize Google API:', error.message);
         return false;
     }
 }
@@ -296,16 +321,28 @@ function findBranchIdByLocationId(locationId) {
 }
 
 async function postReplyToGoogle(reviewId, replyText) {
-    if (!mybusiness) throw new Error('Google API not initialized');
+    if (!mybusiness) {
+        throw new Error('Google API not initialized');
+    }
     
     try {
+        console.log(`📤 Posting reply to review: ${reviewId}`);
+        
         const response = await mybusiness.accounts.locations.reviews.reply({
             name: reviewId,
-            resource: { comment: replyText }
+            resource: {
+                comment: replyText
+            }
         });
+        
+        console.log(`✅ Reply posted successfully`);
         return response.data;
+        
     } catch (error) {
-        console.error('Google API Error:', error.message);
+        console.error('❌ Google API post error:', error.message);
+        if (error.response) {
+            console.error('Response data:', error.response.data);
+        }
         throw error;
     }
 }
