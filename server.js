@@ -17,7 +17,6 @@ let webhookLogs = [];
 
 // Google Connection Status
 let mybusiness = null;
-let googleAuth = null;
 let googleConnectionStatus = {
     connected: false,
     lastCheck: null,
@@ -49,7 +48,6 @@ try {
     branches = JSON.parse(branchesData);
     console.log(`✅ Loaded ${branches.length} branches`);
     
-    // Initialize branch counters
     branches.forEach(branch => {
         replyStats.byBranch[branch.id] = {
             name: branch.name,
@@ -64,53 +62,46 @@ try {
     branches = [];
 }
 
-// ============= GOOGLE BUSINESS API AUTH =============
+// ============= GOOGLE BUSINESS API AUTH (CORRECT VERSION) =============
 async function initializeGoogleAPI() {
     try {
         if (!process.env.GOOGLE_CREDENTIALS) {
             googleConnectionStatus = {
                 connected: false,
                 lastCheck: new Date().toISOString(),
-                error: 'GOOGLE_CREDENTIALS not set in environment',
+                error: 'GOOGLE_CREDENTIALS not set',
                 accountInfo: null
             };
-            console.log('⚠️ GOOGLE_CREDENTIALS not set, API features disabled');
+            console.log('⚠️ GOOGLE_CREDENTIALS not set');
             return false;
         }
         
         console.log('📡 Initializing Google Business API...');
         
         // Parse credentials
-        let credentials;
-        try {
-            credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-            console.log('✅ Credentials parsed successfully');
-        } catch (e) {
-            throw new Error('Invalid GOOGLE_CREDENTIALS JSON: ' + e.message);
-        }
+        const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
         
-        // Create auth client
-        const auth = new google.auth.GoogleAuth({
-            credentials: credentials,
-            scopes: ['https://www.googleapis.com/auth/business.manage']
-        });
+        // Create JWT auth client
+        const auth = new google.auth.JWT(
+            credentials.client_email,
+            null,
+            credentials.private_key,
+            ['https://www.googleapis.com/auth/business.manage']
+        );
         
-        googleAuth = auth;
+        // Authorize
+        await auth.authorize();
+        console.log('✅ Auth successful');
         
-        // Get auth client
-        const authClient = await auth.getClient();
-        
-        // Initialize My Business API - CORRECT WAY
+        // Initialize My Business API - CORRECT METHOD
         mybusiness = google.mybusiness({
             version: 'v4',
-            auth: authClient
+            auth: auth
         });
         
         // Test connection by listing accounts
         try {
-            console.log('🔍 Testing Google Business API connection...');
             const response = await mybusiness.accounts.list();
-            
             const accounts = response.data.accounts || [];
             console.log(`✅ Found ${accounts.length} Google Business accounts`);
             
@@ -122,17 +113,14 @@ async function initializeGoogleAPI() {
                     accountCount: accounts.length,
                     accounts: accounts.map(a => ({ 
                         name: a.accountName || a.name, 
-                        type: a.type,
-                        id: a.name
+                        type: a.type
                     }))
                 }
             };
-            
-            console.log('✅ Google Business API fully connected');
             return true;
             
         } catch (apiError) {
-            console.error('❌ Google Business API test failed:', apiError.message);
+            console.error('❌ API test failed:', apiError.message);
             googleConnectionStatus = {
                 connected: false,
                 lastCheck: new Date().toISOString(),
@@ -143,7 +131,7 @@ async function initializeGoogleAPI() {
         }
         
     } catch (error) {
-        console.error('❌ Failed to initialize Google API:', error.message);
+        console.error('❌ Failed to initialize:', error.message);
         googleConnectionStatus = {
             connected: false,
             lastCheck: new Date().toISOString(),
@@ -168,13 +156,11 @@ function updateReplyStats(replyRecord) {
         replyStats.totalPosted++;
     }
     
-    // Update rating stats
     const ratingKey = replyRecord.rating.toString();
     if (replyStats.byRating[ratingKey]) {
         replyStats.byRating[ratingKey]++;
     }
     
-    // Update branch stats
     if (replyStats.byBranch[replyRecord.branchId]) {
         replyStats.byBranch[replyRecord.branchId].total++;
         if (replyRecord.rating >= 4) {
@@ -185,7 +171,6 @@ function updateReplyStats(replyRecord) {
         replyStats.byBranch[replyRecord.branchId].lastReply = replyRecord.timestamp;
     }
     
-    // Update last 24 hours
     const now = new Date();
     replyStats.last24Hours.unshift({
         timestamp: replyRecord.timestamp,
@@ -195,7 +180,6 @@ function updateReplyStats(replyRecord) {
         posted: replyRecord.posted
     });
     
-    // Keep only last 24 hours
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     replyStats.last24Hours = replyStats.last24Hours.filter(r => new Date(r.timestamp) > oneDayAgo);
 }
@@ -204,7 +188,7 @@ function updateReplyStats(replyRecord) {
 app.post('/api/webhook/google-review', async (req, res) => {
     try {
         const reviewData = req.body;
-        console.log('📨 Received Google Review Webhook:', reviewData);
+        console.log('📨 Received webhook:', reviewData);
         
         webhookLogs.unshift({
             id: Date.now(),
@@ -220,20 +204,19 @@ app.post('/api/webhook/google-review', async (req, res) => {
         
         if (webhookLogs.length > 100) webhookLogs = webhookLogs.slice(0, 100);
         
-        res.json({ success: true, message: 'Review received and processed', result });
+        res.json({ success: true, message: 'Review processed', result });
     } catch (error) {
-        console.error('Error processing webhook:', error);
+        console.error('Error:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// ============= PROCESS REVIEW AUTOMATICALLY =============
+// ============= PROCESS REVIEW =============
 async function processReviewAutomatically(reviewData) {
     try {
         const { reviewId, reviewerName, starRating, comment, locationName, locationId } = reviewData;
         
         let branchId = findBranchId(locationName);
-        if (!branchId) branchId = findBranchIdByLocationId(locationId);
         if (!branchId) branchId = 1;
         
         const branch = branches.find(b => b.id === branchId);
@@ -252,20 +235,15 @@ async function processReviewAutomatically(reviewData) {
         }
         
         let posted = false;
-        let postError = null;
         
-        // Try to post automatically if Google API is initialized
         if (mybusiness && reviewId && !reviewId.startsWith('test_')) {
             try {
                 await postReplyToGoogle(reviewId, reply);
                 posted = true;
-                console.log(`✅ Auto-reply posted for review ${reviewId}`);
+                console.log(`✅ Auto-reply posted for ${reviewId}`);
             } catch (error) {
-                console.error(`Failed to post reply: ${error.message}`);
-                postError = error.message;
+                console.error(`Failed to post: ${error.message}`);
             }
-        } else if (reviewId && !reviewId.startsWith('test_')) {
-            console.log('📝 Auto-reply generated (Google API not connected):', reply);
         }
         
         const replyRecord = {
@@ -279,23 +257,21 @@ async function processReviewAutomatically(reviewData) {
             timestamp: new Date().toISOString(),
             replyType: isPositive ? 'positive' : 'negative',
             autoGenerated: true,
-            posted: posted,
-            postError: postError
+            posted: posted
         };
         
         repliesHistory.unshift(replyRecord);
         if (repliesHistory.length > 1000) repliesHistory = repliesHistory.slice(0, 1000);
         
-        // Update stats
         updateReplyStats(replyRecord);
         
         return {
             branchId, branchName: branch ? branch.name : locationName,
-            rating, reply, autoGenerated: true, posted: posted, postError: postError
+            rating, reply, autoGenerated: true, posted: posted
         };
         
     } catch (error) {
-        console.error('Error in auto-processing:', error);
+        console.error('Error processing:', error);
         throw error;
     }
 }
@@ -315,63 +291,36 @@ function findBranchId(locationName) {
     return null;
 }
 
-function findBranchIdByLocationId(locationId) {
-    const locationMapping = {};
-    return locationMapping[locationId] || null;
-}
-
 async function postReplyToGoogle(reviewId, replyText) {
-    if (!mybusiness) {
-        throw new Error('Google API not initialized');
-    }
+    if (!mybusiness) throw new Error('Google API not initialized');
     
     try {
-        console.log(`📤 Posting reply to review: ${reviewId}`);
-        
         const response = await mybusiness.accounts.locations.reviews.reply({
             name: reviewId,
-            resource: {
-                comment: replyText
-            }
+            resource: { comment: replyText }
         });
-        
-        console.log(`✅ Reply posted successfully`);
         return response.data;
-        
     } catch (error) {
-        console.error('❌ Google API post error:', error.message);
-        if (error.response) {
-            console.error('Response data:', error.response.data);
-        }
+        console.error('Google API Error:', error.message);
         throw error;
     }
 }
 
-// ============= API: GET GOOGLE CONNECTION STATUS =============
+// ============= API ENDPOINTS =============
 app.get('/api/google-status', (req, res) => {
-    res.json({
-        success: true,
-        status: googleConnectionStatus,
-        apiConfigured: !!process.env.GOOGLE_CREDENTIALS
-    });
+    res.json({ success: true, status: googleConnectionStatus });
 });
 
-// ============= API: GET REPLY STATISTICS =============
 app.get('/api/reply-stats', (req, res) => {
-    res.json({
-        success: true,
-        stats: replyStats,
-        recentActivity: replyStats.last24Hours.slice(0, 20)
-    });
+    res.json({ success: true, stats: replyStats });
 });
 
-// ============= API: Generate Reply (Manual) =============
 app.post('/api/get-reply', (req, res) => {
     try {
         const { branchId, reviewText, rating } = req.body;
         
         if (!branchId || !rating) {
-            return res.status(400).json({ error: 'Missing required fields: branchId and rating are required' });
+            return res.status(400).json({ error: 'Missing branchId or rating' });
         }
         
         const branch = branches.find(b => b.id === parseInt(branchId));
@@ -380,13 +329,7 @@ app.post('/api/get-reply', (req, res) => {
         }
         
         const isPositive = rating >= 4;
-        let reply;
-        
-        if (isPositive) {
-            reply = config.getPositiveReply(branchId);
-        } else {
-            reply = config.getNegativeReply(branchId);
-        }
+        let reply = isPositive ? config.getPositiveReply(branchId) : config.getNegativeReply(branchId);
         
         const replyRecord = {
             id: Date.now(),
@@ -404,28 +347,16 @@ app.post('/api/get-reply', (req, res) => {
         repliesHistory.unshift(replyRecord);
         if (repliesHistory.length > 1000) repliesHistory = repliesHistory.slice(0, 1000);
         
-        // Update stats
         updateReplyStats(replyRecord);
         
-        res.json({
-            success: true,
-            reply: reply,
-            branch: branch.name,
-            rating: rating,
-            templateUsed: isPositive ? 'positive' : 'negative',
-            stats: {
-                totalReplies: replyStats.totalRepliesGenerated,
-                autoReplies: replyStats.totalAutoReplies
-            }
-        });
+        res.json({ success: true, reply: reply, branch: branch.name, rating: rating });
         
     } catch (error) {
-        console.error('Error generating reply:', error);
+        console.error('Error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// ============= OTHER API ENDPOINTS =============
 app.get('/api/replies', (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     res.json({ success: true, replies: repliesHistory.slice(0, limit), total: repliesHistory.length });
@@ -453,9 +384,8 @@ app.post('/api/test-webhook', async (req, res) => {
         reviewId: `test_${Date.now()}`,
         reviewerName: "Test Customer",
         starRating: req.body.rating || 5,
-        comment: req.body.comment || "Test review comment",
+        comment: req.body.comment || "Test review",
         locationName: req.body.locationName || "Usmanpura Imaging Centre Mavdi, Rajkot",
-        locationId: "test_location_123",
         createTime: new Date().toISOString()
     };
     
@@ -472,8 +402,6 @@ app.get('/health', (req, res) => {
         status: 'healthy',
         branches: branches.length,
         repliesGenerated: replyStats.totalRepliesGenerated,
-        autoReplies: replyStats.totalAutoReplies,
-        postedReplies: replyStats.totalPosted,
         googleAPIReady: !!mybusiness,
         googleConnected: googleConnectionStatus.connected,
         timestamp: new Date().toISOString()
@@ -487,9 +415,7 @@ async function startServer() {
     app.listen(PORT, () => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📊 Dashboard: https://usmanpura-imaging-review-bot.onrender.com`);
-        console.log(`🏥 Branches loaded: ${branches.length}`);
         console.log(`🤖 Google API: ${mybusiness ? '✅ Connected' : '⚠️ Not connected'}`);
-        console.log(`📈 Google Connection Status: ${googleConnectionStatus.connected ? 'CONNECTED' : 'DISCONNECTED'}`);
     });
 }
 
