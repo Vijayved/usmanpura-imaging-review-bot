@@ -2,7 +2,8 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
-const { google } = require('googleapis');
+const axios = require('axios');
+const { JWT } = require('google-auth-library');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -11,12 +12,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static('public'));
 
-// Store replies and webhook logs
+// Store data
 let repliesHistory = [];
 let webhookLogs = [];
+let accessToken = null;
+let tokenExpiry = null;
 
 // Google Connection Status
-let mybusiness = null;
 let googleConnectionStatus = {
     connected: false,
     lastCheck: null,
@@ -30,13 +32,7 @@ let replyStats = {
     totalAutoReplies: 0,
     totalManualReplies: 0,
     totalPosted: 0,
-    byRating: {
-        '5': 0,
-        '4': 0,
-        '3': 0,
-        '2': 0,
-        '1': 0
-    },
+    byRating: { '5': 0, '4': 0, '3': 0, '2': 0, '1': 0 },
     byBranch: {},
     last24Hours: []
 };
@@ -62,159 +58,116 @@ try {
     branches = [];
 }
 
-// ============= GOOGLE BUSINESS API AUTH (CORRECT VERSION) =============
-async function initializeGoogleAPI() {
+// ============= GET GOOGLE ACCESS TOKEN =============
+async function getGoogleAccessToken() {
     try {
         if (!process.env.GOOGLE_CREDENTIALS) {
-            googleConnectionStatus = {
-                connected: false,
-                lastCheck: new Date().toISOString(),
-                error: 'GOOGLE_CREDENTIALS not set',
-                accountInfo: null
-            };
-            console.log('⚠️ GOOGLE_CREDENTIALS not set');
-            return false;
+            throw new Error('GOOGLE_CREDENTIALS not set');
         }
         
-        console.log('📡 Initializing Google Business API...');
+        // Check if token is still valid
+        if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
+            return accessToken;
+        }
         
-        // Parse credentials
         const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
         
-        // Create JWT auth client
-        const auth = new google.auth.JWT(
-            credentials.client_email,
-            null,
-            credentials.private_key,
-            ['https://www.googleapis.com/auth/business.manage']
-        );
-        
-        // Authorize
-        await auth.authorize();
-        console.log('✅ Auth successful');
-        
-        // Initialize My Business API - CORRECT METHOD
-        mybusiness = google.mybusiness({
-            version: 'v4',
-            auth: auth
+        const client = new JWT({
+            email: credentials.client_email,
+            key: credentials.private_key,
+            scopes: ['https://www.googleapis.com/auth/business.manage']
         });
         
-        // Test connection by listing accounts
-        try {
-            const response = await mybusiness.accounts.list();
-            const accounts = response.data.accounts || [];
-            console.log(`✅ Found ${accounts.length} Google Business accounts`);
-            
-            googleConnectionStatus = {
-                connected: true,
-                lastCheck: new Date().toISOString(),
-                error: null,
-                accountInfo: {
-                    accountCount: accounts.length,
-                    accounts: accounts.map(a => ({ 
-                        name: a.accountName || a.name, 
-                        type: a.type
-                    }))
-                }
-            };
-            return true;
-            
-        } catch (apiError) {
-            console.error('❌ API test failed:', apiError.message);
-            googleConnectionStatus = {
-                connected: false,
-                lastCheck: new Date().toISOString(),
-                error: apiError.message,
-                accountInfo: null
-            };
-            return false;
-        }
+        const response = await client.authorize();
+        accessToken = response.access_token;
+        tokenExpiry = Date.now() + (response.expiry_date || 3600000);
+        
+        console.log('✅ Google Access Token obtained');
+        return accessToken;
         
     } catch (error) {
-        console.error('❌ Failed to initialize:', error.message);
+        console.error('❌ Failed to get token:', error.message);
+        throw error;
+    }
+}
+
+// ============= INITIALIZE GOOGLE CONNECTION =============
+async function initializeGoogleAPI() {
+    try {
+        console.log('📡 Testing Google Business API connection...');
+        
+        const token = await getGoogleAccessToken();
+        
+        // Test by listing accounts
+        const response = await axios.get(
+            'https://mybusiness.googleapis.com/v4/accounts',
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
+        
+        const accounts = response.data.accounts || [];
+        console.log(`✅ Found ${accounts.length} Google Business accounts`);
+        
+        googleConnectionStatus = {
+            connected: true,
+            lastCheck: new Date().toISOString(),
+            error: null,
+            accountInfo: {
+                accountCount: accounts.length,
+                accounts: accounts.map(a => ({ name: a.accountName, type: a.type }))
+            }
+        };
+        
+        return true;
+        
+    } catch (error) {
+        console.error('❌ Google API connection failed:', error.response?.data || error.message);
         googleConnectionStatus = {
             connected: false,
             lastCheck: new Date().toISOString(),
-            error: error.message,
+            error: error.response?.data?.error?.message || error.message,
             accountInfo: null
         };
         return false;
     }
 }
 
-// ============= UPDATE REPLY STATS =============
-function updateReplyStats(replyRecord) {
-    replyStats.totalRepliesGenerated++;
-    
-    if (replyRecord.autoGenerated) {
-        replyStats.totalAutoReplies++;
-    } else {
-        replyStats.totalManualReplies++;
-    }
-    
-    if (replyRecord.posted) {
-        replyStats.totalPosted++;
-    }
-    
-    const ratingKey = replyRecord.rating.toString();
-    if (replyStats.byRating[ratingKey]) {
-        replyStats.byRating[ratingKey]++;
-    }
-    
-    if (replyStats.byBranch[replyRecord.branchId]) {
-        replyStats.byBranch[replyRecord.branchId].total++;
-        if (replyRecord.rating >= 4) {
-            replyStats.byBranch[replyRecord.branchId].positive++;
-        } else {
-            replyStats.byBranch[replyRecord.branchId].negative++;
-        }
-        replyStats.byBranch[replyRecord.branchId].lastReply = replyRecord.timestamp;
-    }
-    
-    const now = new Date();
-    replyStats.last24Hours.unshift({
-        timestamp: replyRecord.timestamp,
-        branchName: replyRecord.branchName,
-        rating: replyRecord.rating,
-        autoGenerated: replyRecord.autoGenerated,
-        posted: replyRecord.posted
-    });
-    
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    replyStats.last24Hours = replyStats.last24Hours.filter(r => new Date(r.timestamp) > oneDayAgo);
-}
-
-// ============= GOOGLE REVIEW WEBHOOK =============
-app.post('/api/webhook/google-review', async (req, res) => {
+// ============= POST REPLY TO GOOGLE =============
+async function postReplyToGoogle(reviewName, replyText) {
     try {
-        const reviewData = req.body;
-        console.log('📨 Received webhook:', reviewData);
+        const token = await getGoogleAccessToken();
         
-        webhookLogs.unshift({
-            id: Date.now(),
-            timestamp: new Date().toISOString(),
-            data: reviewData,
-            processed: false
-        });
+        // reviewName format: accounts/{accountId}/locations/{locationId}/reviews/{reviewId}
+        const url = `https://mybusiness.googleapis.com/v4/${reviewName}/reply`;
         
-        const result = await processReviewAutomatically(reviewData);
+        const response = await axios.put(
+            url,
+            { comment: replyText },
+            {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
         
-        webhookLogs[0].processed = true;
-        webhookLogs[0].result = result;
+        console.log(`✅ Reply posted to ${reviewName}`);
+        return response.data;
         
-        if (webhookLogs.length > 100) webhookLogs = webhookLogs.slice(0, 100);
-        
-        res.json({ success: true, message: 'Review processed', result });
     } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ success: false, error: error.message });
+        console.error('❌ Failed to post reply:', error.response?.data || error.message);
+        throw error;
     }
-});
+}
 
 // ============= PROCESS REVIEW =============
 async function processReviewAutomatically(reviewData) {
     try {
-        const { reviewId, reviewerName, starRating, comment, locationName, locationId } = reviewData;
+        const { reviewId, reviewerName, starRating, comment, locationName, reviewName } = reviewData;
         
         let branchId = findBranchId(locationName);
         if (!branchId) branchId = 1;
@@ -223,12 +176,7 @@ async function processReviewAutomatically(reviewData) {
         const rating = starRating || 5;
         const isPositive = rating >= 4;
         
-        let reply;
-        if (isPositive) {
-            reply = config.getPositiveReply(branchId);
-        } else {
-            reply = config.getNegativeReply(branchId);
-        }
+        let reply = isPositive ? config.getPositiveReply(branchId) : config.getNegativeReply(branchId);
         
         if (reviewerName && reviewerName !== 'Anonymous') {
             reply = `Dear ${reviewerName}, ${reply}`;
@@ -236,13 +184,14 @@ async function processReviewAutomatically(reviewData) {
         
         let posted = false;
         
-        if (mybusiness && reviewId && !reviewId.startsWith('test_')) {
+        // Try to post automatically
+        if (reviewName && !reviewId?.startsWith('test_')) {
             try {
-                await postReplyToGoogle(reviewId, reply);
+                await postReplyToGoogle(reviewName, reply);
                 posted = true;
-                console.log(`✅ Auto-reply posted for ${reviewId}`);
+                console.log(`✅ Auto-reply posted`);
             } catch (error) {
-                console.error(`Failed to post: ${error.message}`);
+                console.log(`⚠️ Auto-post failed, manual reply generated`);
             }
         }
         
@@ -265,10 +214,7 @@ async function processReviewAutomatically(reviewData) {
         
         updateReplyStats(replyRecord);
         
-        return {
-            branchId, branchName: branch ? branch.name : locationName,
-            rating, reply, autoGenerated: true, posted: posted
-        };
+        return { branchId, branchName: branch?.name, rating, reply, posted };
         
     } catch (error) {
         console.error('Error processing:', error);
@@ -276,34 +222,48 @@ async function processReviewAutomatically(reviewData) {
     }
 }
 
-// ============= HELPER FUNCTIONS =============
+// ============= UPDATE STATS =============
+function updateReplyStats(replyRecord) {
+    replyStats.totalRepliesGenerated++;
+    if (replyRecord.autoGenerated) replyStats.totalAutoReplies++;
+    else replyStats.totalManualReplies++;
+    if (replyRecord.posted) replyStats.totalPosted++;
+    
+    const ratingKey = replyRecord.rating.toString();
+    if (replyStats.byRating[ratingKey]) replyStats.byRating[ratingKey]++;
+    
+    if (replyStats.byBranch[replyRecord.branchId]) {
+        replyStats.byBranch[replyRecord.branchId].total++;
+        if (replyRecord.rating >= 4) replyStats.byBranch[replyRecord.branchId].positive++;
+        else replyStats.byBranch[replyRecord.branchId].negative++;
+        replyStats.byBranch[replyRecord.branchId].lastReply = replyRecord.timestamp;
+    }
+    
+    replyStats.last24Hours.unshift({
+        timestamp: replyRecord.timestamp,
+        branchName: replyRecord.branchName,
+        rating: replyRecord.rating,
+        autoGenerated: replyRecord.autoGenerated,
+        posted: replyRecord.posted
+    });
+    
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    replyStats.last24Hours = replyStats.last24Hours.filter(r => new Date(r.timestamp) > oneDayAgo);
+}
+
+// ============= HELPER =============
 function findBranchId(locationName) {
     if (!locationName) return null;
     const branchMapping = {
         'Mavdi': 1, 'Rajkot': 1, 'Nadiad': 2, 'Anand': 3, 'Changodar': 4,
         'Bareja': 5, 'Morbi': 6, 'Usmanpura': 7, 'Satellite': 8, 'Juhapura': 9,
-        'JUHAPURA': 9, 'Vadaj': 10, 'Sabarmati': 11, 'Naroda': 12,
-        'Maninagar': 13, 'Gandhinagar': 14, 'Bapunagar': 15
+        'Vadaj': 10, 'Sabarmati': 11, 'Naroda': 12, 'Maninagar': 13,
+        'Gandhinagar': 14, 'Bapunagar': 15
     };
     for (const [key, id] of Object.entries(branchMapping)) {
         if (locationName.toLowerCase().includes(key.toLowerCase())) return id;
     }
     return null;
-}
-
-async function postReplyToGoogle(reviewId, replyText) {
-    if (!mybusiness) throw new Error('Google API not initialized');
-    
-    try {
-        const response = await mybusiness.accounts.locations.reviews.reply({
-            name: reviewId,
-            resource: { comment: replyText }
-        });
-        return response.data;
-    } catch (error) {
-        console.error('Google API Error:', error.message);
-        throw error;
-    }
 }
 
 // ============= API ENDPOINTS =============
@@ -318,15 +278,12 @@ app.get('/api/reply-stats', (req, res) => {
 app.post('/api/get-reply', (req, res) => {
     try {
         const { branchId, reviewText, rating } = req.body;
-        
         if (!branchId || !rating) {
             return res.status(400).json({ error: 'Missing branchId or rating' });
         }
         
         const branch = branches.find(b => b.id === parseInt(branchId));
-        if (!branch) {
-            return res.status(404).json({ error: 'Branch not found' });
-        }
+        if (!branch) return res.status(404).json({ error: 'Branch not found' });
         
         const isPositive = rating >= 4;
         let reply = isPositive ? config.getPositiveReply(branchId) : config.getNegativeReply(branchId);
@@ -346,13 +303,11 @@ app.post('/api/get-reply', (req, res) => {
         
         repliesHistory.unshift(replyRecord);
         if (repliesHistory.length > 1000) repliesHistory = repliesHistory.slice(0, 1000);
-        
         updateReplyStats(replyRecord);
         
         res.json({ success: true, reply: reply, branch: branch.name, rating: rating });
         
     } catch (error) {
-        console.error('Error:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -384,13 +339,14 @@ app.post('/api/test-webhook', async (req, res) => {
         reviewId: `test_${Date.now()}`,
         reviewerName: "Test Customer",
         starRating: req.body.rating || 5,
-        comment: req.body.comment || "Test review",
+        comment: req.body.comment || "Test review comment",
         locationName: req.body.locationName || "Usmanpura Imaging Centre Mavdi, Rajkot",
+        reviewName: "test_review_name",
         createTime: new Date().toISOString()
     };
     
     const result = await processReviewAutomatically(testReview);
-    res.json({ success: true, message: "Test webhook triggered", review: testReview, result });
+    res.json({ success: true, message: "Test webhook triggered", result });
 });
 
 app.get('/', (req, res) => {
@@ -402,7 +358,6 @@ app.get('/health', (req, res) => {
         status: 'healthy',
         branches: branches.length,
         repliesGenerated: replyStats.totalRepliesGenerated,
-        googleAPIReady: !!mybusiness,
         googleConnected: googleConnectionStatus.connected,
         timestamp: new Date().toISOString()
     });
@@ -415,7 +370,7 @@ async function startServer() {
     app.listen(PORT, () => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📊 Dashboard: https://usmanpura-imaging-review-bot.onrender.com`);
-        console.log(`🤖 Google API: ${mybusiness ? '✅ Connected' : '⚠️ Not connected'}`);
+        console.log(`🤖 Google API: ${googleConnectionStatus.connected ? '✅ Connected' : '⚠️ Not connected'}`);
     });
 }
 
