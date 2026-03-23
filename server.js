@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,15 +26,43 @@ try {
     branches = [];
 }
 
+// ============= GOOGLE BUSINESS API AUTH =============
+let googleAuth = null;
+let mybusiness = null;
+
+async function initializeGoogleAPI() {
+    try {
+        if (!process.env.GOOGLE_CREDENTIALS) {
+            console.log('⚠️ GOOGLE_CREDENTIALS not set, API features disabled');
+            return false;
+        }
+        
+        const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+        
+        googleAuth = new google.auth.GoogleAuth({
+            credentials: credentials,
+            scopes: ['https://www.googleapis.com/auth/business.manage']
+        });
+        
+        mybusiness = google.mybusiness({
+            version: 'v4',
+            auth: googleAuth
+        });
+        
+        console.log('✅ Google Business API initialized');
+        return true;
+    } catch (error) {
+        console.error('❌ Failed to initialize Google API:', error.message);
+        return false;
+    }
+}
+
 // ============= GOOGLE REVIEW WEBHOOK =============
-// Endpoint to receive Google review notifications
 app.post('/api/webhook/google-review', async (req, res) => {
     try {
         const reviewData = req.body;
-        
         console.log('📨 Received Google Review Webhook:', reviewData);
         
-        // Log the incoming webhook
         webhookLogs.unshift({
             id: Date.now(),
             timestamp: new Date().toISOString(),
@@ -41,65 +70,30 @@ app.post('/api/webhook/google-review', async (req, res) => {
             processed: false
         });
         
-        // Process the review
         const result = await processReviewAutomatically(reviewData);
         
-        // Update log
         webhookLogs[0].processed = true;
         webhookLogs[0].result = result;
         
-        // Keep only last 100 logs
-        if (webhookLogs.length > 100) {
-            webhookLogs = webhookLogs.slice(0, 100);
-        }
+        if (webhookLogs.length > 100) webhookLogs = webhookLogs.slice(0, 100);
         
-        res.json({
-            success: true,
-            message: 'Review received and processed',
-            result: result
-        });
-        
+        res.json({ success: true, message: 'Review received and processed', result });
     } catch (error) {
         console.error('Error processing webhook:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Function to automatically process review
+// ============= PROCESS REVIEW AUTOMATICALLY =============
 async function processReviewAutomatically(reviewData) {
     try {
-        // Extract review details
-        const {
-            reviewId,
-            reviewerName,
-            starRating,
-            comment,
-            locationName,
-            locationId,
-            createTime
-        } = reviewData;
+        const { reviewId, reviewerName, starRating, comment, locationName, locationId } = reviewData;
         
-        // Find branch ID from location name
         let branchId = findBranchId(locationName);
+        if (!branchId) branchId = findBranchIdByLocationId(locationId);
+        if (!branchId) branchId = 1;
         
-        // If branch not found, try to match by location ID
-        if (!branchId) {
-            branchId = findBranchIdByLocationId(locationId);
-        }
-        
-        // Default to branch 1 if not found
-        if (!branchId) {
-            console.log(`⚠️ Branch not found for ${locationName}, using default`);
-            branchId = 1;
-        }
-        
-        // Get the branch name
         const branch = branches.find(b => b.id === branchId);
-        
-        // Generate reply based on rating
         const rating = starRating || 5;
         const isPositive = rating >= 4;
         
@@ -110,12 +104,10 @@ async function processReviewAutomatically(reviewData) {
             reply = config.getNegativeReply(branchId);
         }
         
-        // Optional: Personalize reply with reviewer name
         if (reviewerName && reviewerName !== 'Anonymous') {
             reply = `Dear ${reviewerName}, ${reply}`;
         }
         
-        // Store in history
         const replyRecord = {
             id: Date.now(),
             reviewId: reviewId,
@@ -131,14 +123,10 @@ async function processReviewAutomatically(reviewData) {
         };
         
         repliesHistory.unshift(replyRecord);
+        if (repliesHistory.length > 1000) repliesHistory = repliesHistory.slice(0, 1000);
         
-        // Keep only last 1000 records
-        if (repliesHistory.length > 1000) {
-            repliesHistory = repliesHistory.slice(0, 1000);
-        }
-        
-        // If you have Google API configured, post automatically
-        if (process.env.GOOGLE_API_KEY) {
+        // Try to post automatically if Google API is initialized
+        if (mybusiness && reviewId && reviewId !== 'test_') {
             try {
                 await postReplyToGoogle(reviewId, reply);
                 replyRecord.posted = true;
@@ -152,110 +140,90 @@ async function processReviewAutomatically(reviewData) {
         }
         
         return {
-            branchId: branchId,
-            branchName: branch ? branch.name : locationName,
-            rating: rating,
-            reply: reply,
-            autoGenerated: true,
-            posted: replyRecord.posted || false
+            branchId, branchName: branch ? branch.name : locationName,
+            rating, reply, autoGenerated: true, posted: replyRecord.posted || false
         };
-        
     } catch (error) {
         console.error('Error in auto-processing:', error);
         throw error;
     }
 }
 
-// Helper function to find branch ID by location name
+// ============= HELPER FUNCTIONS =============
 function findBranchId(locationName) {
     if (!locationName) return null;
-    
     const branchMapping = {
-        'Mavdi': 1,
-        'Rajkot': 1,
-        'Nadiad': 2,
-        'Anand': 3,
-        'Changodar': 4,
-        'Bareja': 5,
-        'Morbi': 6,
-        'Usmanpura': 7,
-        'Satellite': 8,
-        'Juhapura': 9,
-        'JUHAPURA': 9,
-        'Vadaj': 10,
-        'Sabarmati': 11,
-        'Naroda': 12,
-        'Maninagar': 13,
-        'Gandhinagar': 14,
-        'Bapunagar': 15
+        'Mavdi': 1, 'Rajkot': 1, 'Nadiad': 2, 'Anand': 3, 'Changodar': 4,
+        'Bareja': 5, 'Morbi': 6, 'Usmanpura': 7, 'Satellite': 8, 'Juhapura': 9,
+        'JUHAPURA': 9, 'Vadaj': 10, 'Sabarmati': 11, 'Naroda': 12,
+        'Maninagar': 13, 'Gandhinagar': 14, 'Bapunagar': 15
     };
-    
     for (const [key, id] of Object.entries(branchMapping)) {
-        if (locationName.toLowerCase().includes(key.toLowerCase())) {
-            return id;
-        }
+        if (locationName.toLowerCase().includes(key.toLowerCase())) return id;
     }
-    
     return null;
 }
 
 function findBranchIdByLocationId(locationId) {
-    // You can maintain a mapping of Google Location IDs to your branch IDs
-    const locationMapping = {
-        // Add your Google location IDs here
-        // 'google_location_id_1': 1,
-        // 'google_location_id_2': 2,
-    };
-    
+    const locationMapping = {};
     return locationMapping[locationId] || null;
 }
 
-// Function to post reply to Google (if you have API access)
 async function postReplyToGoogle(reviewId, replyText) {
-    // This is where you'd call Google My Business API
-    // For now, it's a placeholder
-    console.log(`Would post to review ${reviewId}: ${replyText}`);
+    if (!mybusiness) throw new Error('Google API not initialized');
     
-    // Example using Google API:
-    /*
-    const { google } = require('googleapis');
-    const auth = new google.auth.OAuth2(
-        process.env.CLIENT_ID,
-        process.env.CLIENT_SECRET,
-        process.env.REDIRECT_URI
-    );
-    
-    auth.setCredentials({
-        refresh_token: process.env.REFRESH_TOKEN
-    });
-    
-    const mybusiness = google.mybusiness({
-        version: 'v4',
-        auth: auth
-    });
-    
-    await mybusiness.accounts.locations.reviews.reply({
-        name: reviewId,
-        resource: {
-            comment: replyText
-        }
-    });
-    */
-    
-    return true;
+    try {
+        // Format: accounts/{accountId}/locations/{locationId}/reviews/{reviewId}
+        const response = await mybusiness.accounts.locations.reviews.reply({
+            name: reviewId,
+            resource: { comment: replyText }
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Google API Error:', error.message);
+        throw error;
+    }
 }
 
-// ============= EXISTING API ENDPOINTS =============
+// ============= FETCH REVIEWS FROM GOOGLE BUSINESS =============
+app.get('/api/fetch-reviews/:branchId', async (req, res) => {
+    try {
+        const branchId = parseInt(req.params.branchId);
+        const branch = branches.find(b => b.id === branchId);
+        
+        if (!branch) {
+            return res.status(404).json({ error: 'Branch not found' });
+        }
+        
+        if (!mybusiness) {
+            return res.status(503).json({ error: 'Google API not initialized. Add GOOGLE_CREDENTIALS.' });
+        }
+        
+        // You need to map branch ID to Google location ID
+        // For now, return a helpful message
+        res.json({
+            success: false,
+            message: 'Please add googleLocationId to branches.json first',
+            example: {
+                id: branchId,
+                name: branch.name,
+                googleLocationId: 'locations/123456789'
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error fetching reviews:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
 
-// API: Generate Reply (Manual)
+// ============= API: Generate Reply (Manual) =============
 app.post('/api/get-reply', (req, res) => {
     try {
         const { branchId, reviewText, rating } = req.body;
         
         if (!branchId || !rating) {
-            return res.status(400).json({ 
-                error: 'Missing required fields: branchId and rating are required' 
-            });
+            return res.status(400).json({ error: 'Missing required fields: branchId and rating are required' });
         }
         
         const branch = branches.find(b => b.id === parseInt(branchId));
@@ -286,10 +254,7 @@ app.post('/api/get-reply', (req, res) => {
         };
         
         repliesHistory.unshift(replyRecord);
-        
-        if (repliesHistory.length > 1000) {
-            repliesHistory = repliesHistory.slice(0, 1000);
-        }
+        if (repliesHistory.length > 1000) repliesHistory = repliesHistory.slice(0, 1000);
         
         res.json({
             success: true,
@@ -305,34 +270,20 @@ app.post('/api/get-reply', (req, res) => {
     }
 });
 
-// API: Get Reply History
+// ============= OTHER API ENDPOINTS =============
 app.get('/api/replies', (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
-    res.json({
-        success: true,
-        replies: repliesHistory.slice(0, limit),
-        total: repliesHistory.length
-    });
+    res.json({ success: true, replies: repliesHistory.slice(0, limit), total: repliesHistory.length });
 });
 
-// API: Get Webhook Logs
 app.get('/api/webhook-logs', (req, res) => {
-    res.json({
-        success: true,
-        logs: webhookLogs.slice(0, 50),
-        total: webhookLogs.length
-    });
+    res.json({ success: true, logs: webhookLogs.slice(0, 50), total: webhookLogs.length });
 });
 
-// API: Get All Branches
 app.get('/api/branches', (req, res) => {
-    res.json({
-        success: true,
-        branches: branches
-    });
+    res.json({ success: true, branches: branches });
 });
 
-// API: Get Templates
 app.get('/api/templates', (req, res) => {
     res.json({
         success: true,
@@ -342,8 +293,7 @@ app.get('/api/templates', (req, res) => {
     });
 });
 
-// API: Test Webhook (for testing)
-app.post('/api/test-webhook', (req, res) => {
+app.post('/api/test-webhook', async (req, res) => {
     const testReview = {
         reviewId: `test_${Date.now()}`,
         reviewerName: "Test Customer",
@@ -354,37 +304,37 @@ app.post('/api/test-webhook', (req, res) => {
         createTime: new Date().toISOString()
     };
     
-    processReviewAutomatically(testReview);
-    
-    res.json({
-        success: true,
-        message: "Test webhook triggered",
-        review: testReview
-    });
+    const result = await processReviewAutomatically(testReview);
+    res.json({ success: true, message: "Test webhook triggered", review: testReview, result });
 });
 
-// Serve Dashboard
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Health check
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
+    res.json({
+        status: 'healthy',
         branches: branches.length,
         repliesGenerated: repliesHistory.length,
         webhookReceived: webhookLogs.length,
+        googleAPIReady: !!mybusiness,
         timestamp: new Date().toISOString()
     });
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📊 Dashboard: http://localhost:${PORT}`);
-    console.log(`🏥 Branches loaded: ${branches.length}`);
-    console.log(`💬 Positive templates: ${config.positiveReplies.length}`);
-    console.log(`💬 Negative templates: ${config.negativeReplies.length}`);
-    console.log(`🤖 Auto-reply webhook: POST /api/webhook/google-review`);
-});
+// ============= START SERVER =============
+async function startServer() {
+    await initializeGoogleAPI();
+    
+    app.listen(PORT, () => {
+        console.log(`🚀 Server running on port ${PORT}`);
+        console.log(`📊 Dashboard: https://usmanpura-imaging-review-bot.onrender.com`);
+        console.log(`🏥 Branches loaded: ${branches.length}`);
+        console.log(`💬 Positive templates: ${config.positiveReplies.length}`);
+        console.log(`💬 Negative templates: ${config.negativeReplies.length}`);
+        console.log(`🤖 Google API: ${mybusiness ? '✅ Ready' : '⚠️ Not configured'}`);
+    });
+}
+
+startServer();
