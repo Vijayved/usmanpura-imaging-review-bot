@@ -100,7 +100,7 @@ async function initializeGoogleAPI() {
         
         // Test by listing accounts
         const response = await axios.get(
-            'https://mybusiness.googleapis.com/v4/accounts',
+            'https://mybusinessaccountmanagement.googleapis.com/v1/accounts',
             {
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -142,7 +142,7 @@ async function postReplyToGoogle(reviewName, replyText) {
         const token = await getGoogleAccessToken();
         
         // reviewName format: accounts/{accountId}/locations/{locationId}/reviews/{reviewId}
-        const url = `https://mybusiness.googleapis.com/v4/${reviewName}/reply`;
+        const url = `https://mybusinessbusinessinformation.googleapis.com/v1/${reviewName}/reply`;
         
         const response = await axios.put(
             url,
